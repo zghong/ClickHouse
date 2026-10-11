@@ -107,6 +107,8 @@ TEST(ActionLocksManager, StorageOwnershipSurvivesAddressReuse)
     manager.add(second, ActionLocks::PartsMove);
     EXPECT_EQ(manager.getStoppedActions(second), Names{"moves"});
     manager.remove(second, ActionLocks::PartsMove);
+    /// Removing the last control reclaims the entry; the recycled address stays clean
+    /// even if this storage lives on and its address is never reused.
     second.reset();
 
     /// Destroying the blocker expires the previous owner's locks; the next sweep reclaims the entry.

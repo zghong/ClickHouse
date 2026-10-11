@@ -102,7 +102,11 @@ void ActionLocksManager::remove(const StoragePtr & table, StorageActionBlockType
         return;
 
     if (it->second.belongsTo(table))
+    {
         it->second.locks.erase(action_type);
+        if (it->second.locks.empty())
+            storage_locks.erase(it);
+    }
     else
         storage_locks.erase(it);
 }
