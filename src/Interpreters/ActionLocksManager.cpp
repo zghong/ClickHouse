@@ -74,9 +74,13 @@ void ActionLocksManager::add(const StoragePtr & table, StorageActionBlockType ac
 {
     ActionLock action_lock = table->getActionLock(action_type);
 
+    std::lock_guard lock(mutex);
+    auto it = storage_locks.find(table.get());
+    if (it != storage_locks.end() && !it->second.belongsTo(table))
+        storage_locks.erase(it);
+
     if (!action_lock.expired())
     {
-        std::lock_guard lock(mutex);
         auto & entry = storage_locks[table.get()];
         entry.storage = table;
         entry.locks[action_type] = std::move(action_lock);

@@ -70,9 +70,8 @@ TEST(ActionLocksManager, GetStoppedActionsReturnsRegisteredControls)
 TEST(ActionLocksManager, StorageOwnershipSurvivesAddressReuse)
 {
     ActionLocksManager manager(getContext().context);
-    ActionBlocker blocker;
     alignas(ActionLocksTestStorage) std::byte memory[sizeof(ActionLocksTestStorage)];
-    auto make_storage = [&]
+    auto make_storage = [&](ActionBlocker & blocker)
     {
         return StoragePtr(new (memory) ActionLocksTestStorage(blocker), [](IStorage * storage)
         {
@@ -80,28 +79,31 @@ TEST(ActionLocksManager, StorageOwnershipSurvivesAddressReuse)
         });
     };
 
-    auto first = make_storage();
+    ActionBlocker first_blocker;
+    auto first = make_storage(first_blocker);
     manager.add(first, ActionLocks::PartsMerge);
     EXPECT_EQ(manager.getStoppedActions(first), Names{"merges"});
     first.reset();
-    EXPECT_TRUE(blocker.isCancelled());
+    EXPECT_TRUE(first_blocker.isCancelled());
 
     /// A new storage at the recycled address must not observe the previous owner's controls.
-    auto second = make_storage();
+    auto second = make_storage(first_blocker);
     EXPECT_TRUE(manager.getStoppedActions(second).empty());
 
-    /// A control registered by the new owner coexists with the stale entry until the blocker expires.
+    /// A control registered by the new owner replaces the stale entry, not merges with it.
     manager.add(second, ActionLocks::PartsMove);
     EXPECT_EQ(manager.getStoppedActions(second), Names{"moves"});
     manager.remove(second, ActionLocks::PartsMove);
-    EXPECT_TRUE(manager.getStoppedActions(second).empty());
+    second.reset();
 
-    /// The stale entry is reclaimed only when the previous blocker expires.
+    /// Destroying the blocker expires the previous owner's locks; the next sweep reclaims the entry.
     {
-        ActionBlocker expiring_blocker = std::move(blocker);
+        ActionBlocker expiring_blocker = std::move(first_blocker);
     }
     manager.cleanExpired();
-    auto third = make_storage();
+
+    ActionBlocker third_blocker;
+    auto third = make_storage(third_blocker);
     manager.add(third, ActionLocks::ViewRefresh);
     EXPECT_EQ(manager.getStoppedActions(third), Names{"view_refresh"});
     third.reset();
