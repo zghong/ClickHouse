@@ -188,6 +188,18 @@ namespace
         return path.substr(0, position);
     }
 
+    /// The suffix that names the resource a Web failover group resolved to, for the cache identities that
+    /// are built after the metadata probe. A path names the group, and its endpoints can serve different
+    /// contents under the same path, with the same `Last-Modified` and the same ETag (which is scoped to
+    /// one endpoint). It is hashed because the selected URL can carry credentials, and the suffix reaches
+    /// `system.query_condition_cache` and the logs.
+    String getSelectedResourceSuffix(const RelativePathWithMetadata & object_info)
+    {
+        if (!object_info.resolved_url)
+            return {};
+        return fmt::format("#resolved_url={}", sipHash128String(*object_info.resolved_url));
+    }
+
     String getPageCachePathForObjectStorage(const RelativePathWithMetadata & object_info, const ObjectStoragePtr & object_storage)
     {
         if (object_storage->getType() != ObjectStorageType::Web)
@@ -503,9 +515,13 @@ std::optional<String> StorageObjectStorageSource::makeQueryConditionCacheKey(
     const StorageObjectStorageConfiguration & configuration, const ObjectInfo & object_info, const UUID & table_uuid)
 {
     String identifier = object_info.getIdentifier(/*include_file_bucket_info=*/false);
-    if (table_uuid == UUIDHelpers::Nil)
+    /// The table UUID identifies the table, not the endpoint a Web failover group resolved to: its
+    /// endpoints can serve different bytes under the same path and a strong ETag, so the selected
+    /// resource has to be part of the key exactly as in the schema, count, page, footer and columns caches.
+    if (table_uuid == UUIDHelpers::Nil || object_info.relative_path_with_metadata.resolved_url)
     {
-        const String qualified_path = getUniqueStoragePathIdentifier(configuration, object_info, /*include_connection_info=*/true);
+        const String qualified_path = getUniqueStoragePathIdentifier(configuration, object_info, /*include_connection_info=*/true)
+            + getSelectedResourceSuffix(object_info.relative_path_with_metadata);
         /// NUL cannot occur in a path, so it separates the two unambiguously.
         const String hashed = sipHash128String(identifier + '\0' + qualified_path);
         identifier = identifier.substr(0, identifier.find_first_of("?#")) + "#storage=" + hashed;
@@ -678,7 +694,7 @@ std::shared_ptr<IObjectIterator> StorageObjectStorageSource::createFileIterator(
             /// it against the first (possibly missing) path would hide a working fallback.
             if (!has_path_overrides && VirtualColumnUtils::buildSetsForDAG(*filter_dag, local_context))
             {
-                auto actions = std::make_shared<ExpressionActions>(std::move(*filter_dag));
+                auto actions = std::make_shared<ExpressionActions>(std::move(*filter_dag), ExpressionActionsSettings(local_context));
                 VirtualColumnUtils::filterByPathOrFile(
                     indexed_paths, filter_paths, actions, virtual_columns, hive_columns, local_context,
                     /*format_settings=*/std::nullopt,
@@ -1325,7 +1341,8 @@ Chunk StorageObjectStorageSource::generate()
         if (reader.use_top_k_query_condition_cache_key && reader.getInputFormat() && !isCancelled())
         {
             const auto * input_format = reader.getInputFormat();
-            const auto query_condition_cache_key = makeQueryConditionCacheKey(*reader.getObjectInfo(), configuration->isDataLakeConfiguration());
+            const auto query_condition_cache_key
+                = makeQueryConditionCacheKey(*configuration, *reader.getObjectInfo(), storage_id.uuid);
             auto buckets_opt = input_format->getMatchedBuckets();
             if (query_condition_cache_key && buckets_opt.has_value())
                 pending_top_k_query_condition_cache_entries.push_back(PendingTopKQueryConditionCacheEntry{
@@ -1377,7 +1394,8 @@ void StorageObjectStorageSource::addNumRowsToCache(const ObjectInfo & object_inf
         object_info.getFileFormat().value_or(configuration->format),
         format_settings,
         read_context);
-    schema_cache.addNumRows(cache_key, num_rows);
+    /// The key names the failover group, so the entry records the endpoint it was read from.
+    schema_cache.addNumRows(cache_key, num_rows, object_info.relative_path_with_metadata.resolved_url);
 }
 
 StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReader()
@@ -1645,7 +1663,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
                 return std::nullopt;
             return std::optional<time_t>(metadata->last_modified.epochTime());
         };
-        return schema_cache->tryGetNumRows(cache_key, get_last_mod_time);
+        return schema_cache->tryGetNumRows(
+            cache_key, get_last_mod_time, [&] { return object_info->relative_path_with_metadata.resolved_url; });
     };
 
     /// Row-level delete transformers need real row values: an equality-delete FilterTransform
@@ -1986,10 +2005,13 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
             if (object_info->isArchive())
                 object_with_metadata->relative_path = getArchiveEntryKey(object_info->getPath(), object_info->archive_entry_index);
             /// The relative path alone does not identify the object: another bucket, container or
-            /// endpoint can have an object with the same key and version token.
+            /// endpoint can have an object with the same key and version token. The selected resource of a
+            /// Web failover group is part of it for the same reason: the version token is scoped to one
+            /// endpoint, and the footer and the decoded columns of another one must not answer for it.
             if (auto table_uuid = getColumnsCacheTableUUIDOfExternalFile(storage_id))
             {
-                object_with_metadata->path_for_content_cache = getUniqueStoragePathIdentifier(*configuration, *object_info);
+                object_with_metadata->path_for_content_cache = getUniqueStoragePathIdentifier(*configuration, *object_info)
+                    + getSelectedResourceSuffix(object_info->relative_path_with_metadata);
                 object_with_metadata->storage_type_for_content_cache = configuration->getType();
                 object_with_metadata->table_uuid_for_content_cache = *table_uuid;
             }
