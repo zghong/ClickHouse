@@ -1003,7 +1003,7 @@ Below version `8` the announcement is fire-and-forget regardless of mode, and th
 | has_resolved_url | VarUInt | version ≥ `14` | `0` if absent, `1` if the next field is present. This flag is encoded for all version-`14` tasks, including non-Web tasks. |
 | resolved_url | String | version ≥ `14` and presence flag is `1` | Concrete Web URL selected by the metadata probe, encoded as a `VarUInt` byte length followed by the URL bytes. Subsequent metadata and data requests use this URL rather than selecting another failover option. |
 
-Distributed Web reads through `urlCluster`, including HTTP index-page wildcards and archives, require a worker protocol version of at least `14`, even when `resolved_url` is absent. Older workers interpret task paths through the legacy URL reader and cannot safely execute these tasks; the initiator rejects them with `UNKNOWN_PROTOCOL` instead of downgrading. Version `12` retains its archive-entry-position meaning, and version `13` retains its table-read capability meaning.
+A `urlCluster` read that dispatches Web object-storage tasks - HTTP index-page wildcards and archives - requires a worker protocol version of at least `14`, even when `resolved_url` is absent. Older workers interpret task paths through the legacy URL reader and cannot safely execute these tasks; the initiator rejects them with `UNKNOWN_PROTOCOL` instead of downgrading. A `urlCluster` read of a plain URL stays on the legacy reader and does not consult this version. Version `12` retains its archive-entry-position meaning, and version `13` retains its table-read capability meaning.
 
 ### QueryPlan {#queryplan}
 

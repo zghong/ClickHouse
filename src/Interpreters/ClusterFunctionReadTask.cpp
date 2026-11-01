@@ -101,6 +101,18 @@ void ClusterFunctionReadTaskResponse::serialize(WriteBuffer & out, size_t worker
             DBMS_CLUSTER_PROCESSING_PROTOCOL_VERSION_WITH_WEB_URL_TASKS);
     }
 
+    /// Fail closed before anything is written: a worker that cannot carry the URL selects a failover option
+    /// again, which may be another resource than the one the metadata probe pinned here. A task that sets
+    /// the URL without the capability marker is rejected by the check above, so this one covers a task that
+    /// carries the URL and nothing else.
+    if (resolved_url.has_value() && protocol_version < DBMS_CLUSTER_PROCESSING_PROTOCOL_VERSION_WITH_WEB_URL_TASKS)
+        throw Exception(
+            ErrorCodes::UNKNOWN_PROTOCOL,
+            "Worker protocol version {} cannot carry `resolved_url`, which is required to read the Web resource "
+            "the metadata probe selected (minimum protocol version: {})",
+            protocol_version,
+            DBMS_CLUSTER_PROCESSING_PROTOCOL_VERSION_WITH_WEB_URL_TASKS);
+
     writeVarUInt(protocol_version, out);
     writeStringBinary(path, out);
 
