@@ -687,31 +687,36 @@ def test_url_path_with_literal_double_colon_requires_archive_syntax_off():
 
 
 def test_url_writes_to_archive_paths():
-    archive_url = "http://resolver:8087/data/simple_archive.zip :: eod.csv"
-    for archive_path_syntax, expected_error in [
-        (1, "Write into archive is not supported"),
-        (0, "Bad URI syntax: URI contains invalid characters"),
-    ]:
-        error = node1.query_and_get_error(
-            f"INSERT INTO FUNCTION url('{archive_url}', 'CSV', 'x UInt64') VALUES (1)",
-            settings={"allow_archive_path_syntax": archive_path_syntax},
-        )
-        assert expected_error in error
+    # The POSTed paths are served before the archive data until the server is reset, so leave none behind
+    # for the tests that run after this one, even when an assertion below fails.
+    try:
+        archive_url = "http://resolver:8087/data/simple_archive.zip :: eod.csv"
+        for archive_path_syntax, expected_error in [
+            (1, "Write into archive is not supported"),
+            (0, "Bad URI syntax: URI contains invalid characters"),
+        ]:
+            error = node1.query_and_get_error(
+                f"INSERT INTO FUNCTION url('{archive_url}', 'CSV', 'x UInt64') VALUES (1)",
+                settings={"allow_archive_path_syntax": archive_path_syntax},
+            )
+            assert expected_error in error
 
-    targets = [
-        ("http://resolver:8087/data/simple_archive.zip::eod.csv", 1, {"allow_archive_path_syntax": 0}),
-        ("http://resolver:8087/data/file.tar", 2, {}),
-        ("http://resolver:8087/data/file.csv", 3, {}),
-    ]
-    for target_url, value, settings in targets:
-        node1.query(
-            f"INSERT INTO FUNCTION url('{target_url}', 'CSV', 'x UInt64') VALUES ({value})",
-            settings=settings,
-        )
-        assert node1.query(
-            f"SELECT sum(x) FROM url('{target_url}', 'CSV', 'x UInt64')",
-            settings=settings,
-        ).strip() == str(value)
+        targets = [
+            ("http://resolver:8087/data/simple_archive.zip::eod.csv", 1, {"allow_archive_path_syntax": 0}),
+            ("http://resolver:8087/data/file.tar", 2, {}),
+            ("http://resolver:8087/data/file.csv", 3, {}),
+        ]
+        for target_url, value, settings in targets:
+            node1.query(
+                f"INSERT INTO FUNCTION url('{target_url}', 'CSV', 'x UInt64') VALUES ({value})",
+                settings=settings,
+            )
+            assert node1.query(
+                f"SELECT sum(x) FROM url('{target_url}', 'CSV', 'x UInt64')",
+                settings=settings,
+            ).strip() == str(value)
+    finally:
+        reset_index_page_server_stats()
 
 
 def test_url_archive_path_braces_are_expanded_without_index_listing():
@@ -847,6 +852,8 @@ def test_url_index_wildcard_pins_selected_source(archive):
         "use_hive_partitioning": 0,
         "schema_inference_use_cache_for_url": 0,
         "use_page_cache_for_object_storage": 0,
+        # The assertions below count requests, so a retry must not inflate them.
+        "http_max_tries": 1,
     }
     cases = [("url", False, 0), ("url", True, 0), ("urlCluster", False, 0)]
     if archive:
@@ -863,12 +870,16 @@ def test_url_index_wildcard_pins_selected_source(archive):
         )
         assert result == "7\tmirror\n"
 
-        # Verify the listing path, not the already-covered fixed-key iterator. A recovered primary
-        # can serve different bytes; neither schema inference nor workers may reselect it after HEAD.
+        # Verify the listing path, not the already-covered fixed-key iterator. The primary never
+        # supplies metadata, so a reader that reselects the source instead of staying on the URL the
+        # probe chose shows up as an extra metadata probe of the primary - the count is the signal,
+        # because the reselected primary fails the probe and the read falls back to the mirror anyway.
+        # One probe per storage that reads the file: the inferred case builds one for inference and one
+        # for the query.
         stats = get_index_page_server_stats()
         file_path = "/data/index_pin/archive.zip" if archive else "/data/index_pin/part.tsv"
         assert any(key.startswith("GET /data/index_pin/?") for key in stats), stats
-        assert stats.get(f"HEAD {file_path}?source=primary", 0) > 0, stats
+        assert stats.get(f"HEAD {file_path}?source=primary", 0) == (2 if infer_schema else 1), stats
         assert stats.get(f"HEAD {file_path}?source=mirror", 0) > 0, stats
         assert stats.get(f"GET {file_path}?source=primary", 0) == 0, stats
         assert stats.get(f"GET {file_path}?source=mirror", 0) > 0, stats

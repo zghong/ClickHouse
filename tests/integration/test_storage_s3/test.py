@@ -3086,6 +3086,7 @@ def test_archive(started_cluster):
         node2.query(f"SELECT count() FROM {cluster_function_old}", query_id=query_id)
     )
     node2.query("SYSTEM FLUSH LOGS")
+    # One line per archive: the three archives are sent whole, and no archive is sent twice.
     assert 3 == int(
         node2.query(
             f"SELECT count() FROM system.text_log WHERE query_id = '{query_id}' AND message ilike '%send over the whole%'"

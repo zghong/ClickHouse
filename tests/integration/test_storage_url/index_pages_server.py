@@ -130,6 +130,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if self.path == "/__reset__":
             self.request_counts.clear()
+            # A POSTed file outlives the test that wrote it, and it is served before the archive data.
+            WRITTEN_DATA.clear()
             type(self).pin_primary_failures_remaining = 2
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -281,7 +283,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         if source is not None:
             self.send_header("X-Source", source)
         self.end_headers()
-        self.wfile.write(response_data)
+        try:
+            self.wfile.write(response_data)
+        except (BrokenPipeError, ConnectionResetError):
+            # An archive seek closes a lookahead response before consuming its whole body.
+            pass
 
     def do_HEAD(self):
         if self._handle_control():
