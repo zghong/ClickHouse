@@ -702,16 +702,16 @@ std::shared_ptr<IObjectIterator> StorageObjectStorageSource::createFileIterator(
             }
             else
             {
-                deferred_filter_actions = std::make_shared<ExpressionActions>(std::move(*filter_dag));
+                deferred_filter_actions = std::make_shared<ExpressionActions>(std::move(*filter_dag), ExpressionActionsSettings(local_context));
             }
         }
 
-        /// Hard-code `skip_object_metadata` to false here because archive reading needs correct object
-        /// metadata: fixed archive paths must not keep skipping metadata fetch, otherwise whole-archive
-        /// distribution may end up with a wrong archive size.
+        /// Archive reading needs correct object metadata: fixed archive paths must not keep skipping the
+        /// metadata fetch, otherwise whole-archive distribution may end up with a wrong archive size. Every
+        /// other path keeps the value the caller passed.
         iterator = std::make_unique<KeysIterator>(
             indexed_paths, object_storage, virtual_columns, is_archive ? nullptr : read_keys,
-            query_settings.ignore_non_existent_file, /*skip_object_metadata=*/false, with_tags,
+            query_settings.ignore_non_existent_file, is_archive ? false : skip_object_metadata, with_tags,
             file_progress_callback, deferred_filter_actions, hive_columns, configuration->getNamespace(), local_context,
             is_explicit_archive_member ? configuration->getPathInArchive() : String{},
             /*filter_after_metadata=*/has_path_overrides);
@@ -3012,7 +3012,12 @@ ObjectInfoPtr StorageObjectStorageSource::ReadTaskIterator::next(size_t)
         return object_info;
 
     const auto path = object_info->getPath();
-    auto [path_to_archive, path_in_archive] = getURIAndArchivePattern(path);
+    /// A Web task path is relative and may carry a query or a fragment, which `getURIAndArchivePattern` does not
+    /// recognize as part of an archive path. Any other storage passes a key, which may contain those characters
+    /// itself, so it keeps the plain splitter.
+    auto [path_to_archive, path_in_archive] = object_storage->getType() == ObjectStorageType::Web
+        ? getURLAndArchivePattern(path)
+        : getURIAndArchivePattern(path);
     if (!path_in_archive.has_value())
     {
         /// `ObjectInfoInArchive::getPath` gives `<archive>::` for an archive entry without a name.
@@ -3054,8 +3059,14 @@ ObjectInfoPtr StorageObjectStorageSource::ReadTaskIterator::createObjectInfoInAr
         else
         {
             const auto archive_size = getKnownArchiveSize(archive_object);
+            /// The archive type is decided by the suffix, which a Web task path carrying a query or a fragment
+            /// does not end with; the request itself still uses the whole path. A local path or an S3 key may
+            /// contain those characters itself, so only a Web path is stripped.
+            const auto path_for_type = object_storage->getType() == ObjectStorageType::Web
+                ? path_to_archive.substr(0, path_to_archive.find_first_of("?#"))
+                : path_to_archive;
             archive_reader = DB::createArchiveReader(
-                path_to_archive,
+                path_for_type,
                 [=, this]() { return createReadBuffer(archive_object->relative_path_with_metadata, object_storage, getContext(), log); },
                 archive_size);
 
@@ -3126,9 +3137,16 @@ std::shared_ptr<IArchiveReader>
 StorageObjectStorageSource::ArchiveIterator::createArchiveReader(ObjectInfoPtr object_info) const
 {
     const auto size = getKnownArchiveSize(object_info);
+    /// The archive type is decided by the suffix, which a Web path carrying a query or a fragment does not
+    /// end with; the request itself still uses the whole path. A local path or an S3 key may contain those
+    /// characters itself, so only a Web path is stripped.
+    const auto path_to_archive = object_info->getPath();
+    const auto path_for_type = object_storage->getType() == ObjectStorageType::Web
+        ? path_to_archive.substr(0, path_to_archive.find_first_of("?#"))
+        : path_to_archive;
     return DB::createArchiveReader(
         /* path_to_archive */
-        object_info->getPath(),
+        path_for_type,
         /* archive_read_function */ [=, this]()
         { return createReadBuffer(object_info->relative_path_with_metadata, object_storage, getContext(), log); },
         /* archive_size */ size);

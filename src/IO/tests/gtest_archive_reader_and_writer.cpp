@@ -106,6 +106,44 @@ private:
 };
 
 
+/// A task path of a distributed Web read is relative and can carry a query or a fragment, which the archive
+/// splitter has to recognize as part of the archive path rather than as a literal URL.
+TEST(ArchiveUtils, SplitsRelativeWebTaskPathWithQueryOrFragment)
+{
+    const auto [with_query_archive, with_query_member] = getURLAndArchivePattern("data/a.zip?token=x::value.tsv");
+    EXPECT_EQ(with_query_archive, "data/a.zip?token=x");
+    EXPECT_EQ(with_query_member, "value.tsv");
+
+    const auto [with_fragment_archive, with_fragment_member] = getURLAndArchivePattern("data/a.zip#v2::value.tsv");
+    EXPECT_EQ(with_fragment_archive, "data/a.zip#v2");
+    EXPECT_EQ(with_fragment_member, "value.tsv");
+
+    /// A path without a query or a fragment keeps the plain form.
+    const auto [plain_archive, plain_member] = getURLAndArchivePattern("data/a.zip::value.tsv");
+    EXPECT_EQ(plain_archive, "data/a.zip");
+    EXPECT_EQ(plain_member, "value.tsv");
+
+    /// A top-level archive listed by an index page has no directory in its task path.
+    const auto [top_level_archive, top_level_member] = getURLAndArchivePattern("a.zip?token=x::value.tsv");
+    EXPECT_EQ(top_level_archive, "a.zip?token=x");
+    EXPECT_EQ(top_level_member, "value.tsv");
+
+    /// A `::` in a query of a path that is not an archive stays literal.
+    const auto [literal, no_member] = getURLAndArchivePattern("data/a.csv?x=::1");
+    EXPECT_EQ(literal, "data/a.csv?x=::1");
+    EXPECT_FALSE(no_member.has_value());
+
+    /// A host that ends with an archive suffix is not a path either.
+    const auto [host_only, host_only_member] = getURLAndArchivePattern("http://example.zip?x=::1");
+    EXPECT_EQ(host_only, "http://example.zip?x=::1");
+    EXPECT_FALSE(host_only_member.has_value());
+
+    /// A key of a non-Web storage may contain `?` itself, and its splitter does not treat it as a query.
+    const auto [key_archive, key_member] = getURIAndArchivePattern("s3://bucket/dir/a?b.zip::value.tsv");
+    EXPECT_EQ(key_archive, "s3://bucket/dir/a?b.zip");
+    EXPECT_EQ(key_member, "value.tsv");
+}
+
 TEST_P(ArchiveReaderAndWriterTest, EmptyArchive)
 {
     /// Make an archive.
