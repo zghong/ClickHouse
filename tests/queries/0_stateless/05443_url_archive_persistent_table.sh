@@ -36,6 +36,26 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def respond(self, with_body):
+        # The same URL read as a literal path, for a table whose definition was parsed with
+        # `allow_archive_path_syntax = 0`: the storage must keep reading it literally.
+        if self.path == '/a.zip::value.tsv':
+            body = b'7\n'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if with_body:
+                self.wfile.write(body)
+            return
+        if self.path == '/plain.csv':
+            body = b'5\n'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if with_body:
+                self.wfile.write(body)
+            return
         if self.path != '/a.zip':
             self.send_error(404)
             return
@@ -76,6 +96,8 @@ PY
 HTTP_PID=$ARCHIVE_HTTP_PID
 read -r -t 30 HTTP_PORT <&"${ARCHIVE_HTTP[0]}"
 ARCHIVE_URL="http://127.0.0.1:${HTTP_PORT}/a.zip :: value.tsv"
+# The same source without spaces, which is also archive syntax while the setting is on.
+LITERAL_URL="http://127.0.0.1:${HTTP_PORT}/a.zip::value.tsv"
 
 # Both explicit columns and schema inference must create an archive-aware persistent table.
 ${CLICKHOUSE_LOCAL} --path="${WORKING_FOLDER}/local" --multiquery --query "
@@ -89,6 +111,21 @@ ${CLICKHOUSE_LOCAL} --path="${WORKING_FOLDER}/local" --multiquery --query "
     INSERT INTO d.inferred_schema VALUES (99); -- { error NOT_IMPLEMENTED }
     INSERT INTO FUNCTION url('${ARCHIVE_URL}', 'TSV', 'x UInt64') VALUES (99); -- { error NOT_IMPLEMENTED }
     SELECT 'creation writes rejected';
+" -- --max_server_memory_usage=10G --memory_worker_use_cgroup=0
+
+# A stored definition is interpreted again under the loading context, so a session value of the setting
+# that differs from the server default would make the table read a different resource than the one its
+# columns describe. That combination is rejected instead of persisted.
+${CLICKHOUSE_LOCAL} --path="${WORKING_FOLDER}/local" --multiquery --query "
+    SET allow_archive_path_syntax = 0, http_max_tries = 1;
+    SELECT 'literal url', x FROM url('${LITERAL_URL}', 'TSV', 'x UInt64');
+    -- A source without an archive separator means the same thing under both values of the setting, so a
+    -- definition that only differs in the setting value is accepted.
+    CREATE DATABASE literal;
+    CREATE TABLE literal.plain (x UInt64) AS url('http://127.0.0.1:${HTTP_PORT}/plain.csv', 'TSV', 'x UInt64');
+    SELECT 'plain', x FROM literal.plain;
+    CREATE TABLE literal.t (x UInt64) AS url('${LITERAL_URL}', 'TSV', 'x UInt64'); -- { serverError BAD_ARGUMENTS }
+    SELECT 'session setting differing from the server default is rejected';
 " -- --max_server_memory_usage=10G --memory_worker_use_cgroup=0
 
 # A fresh process replays the persisted metadata with cached columns, then reads and rejects writes.

@@ -266,7 +266,7 @@ void StorageWebConfiguration::setNamespaceFromURL(ContextPtr context)
     const auto max_addresses = context->getSettingsRef()[Setting::glob_expansion_max_elements];
     String url = raw_url;
     archive_pattern.reset();
-    if (context->getSettingsRef()[Setting::allow_archive_path_syntax])
+    if (allow_archive_path_syntax.value_or(context->getSettingsRef()[Setting::allow_archive_path_syntax]))
         std::tie(url, archive_pattern) = getURLAndArchivePattern(raw_url);
 
     const auto scheme_pos = url.find("://");
@@ -288,7 +288,7 @@ void StorageWebConfiguration::setNamespaceFromURL(ContextPtr context)
     /// path as an option of the same logical URL shard. HTTP index-page listing cannot preserve that
     /// grouping, so combining path failover with `*` / `**` remains unsupported.
     const bool has_path_failover = path.path.contains('|');
-    if (has_path_failover && path.path.contains('*'))
+    if (has_path_failover && path.path.find_first_of("*?") != String::npos)
         throw Exception(
             ErrorCodes::BAD_ARGUMENTS,
             "Failover patterns ('|') in the path are not supported when expanding `url` wildcards "
@@ -300,6 +300,20 @@ void StorageWebConfiguration::setNamespaceFromURL(ContextPtr context)
     URLShardsWithFailover path_shards_with_failover{{path.path}};
     if (has_path_failover)
         path_shards_with_failover = parseURLShardsWithFailover(path.path, max_addresses, "url");
+
+    /// A path option that carries its own scheme is not a path override: `buildURL` keeps the origin of
+    /// the first option, so such an option would resolve to the primary again instead of failing over to
+    /// the host it names. Reject it rather than probing the primary twice. Only a failover alternative is
+    /// validated: a plain path may legitimately contain `://`, e.g. a proxy that takes the target URL.
+    if (has_path_failover)
+        for (const auto & path_options : path_shards_with_failover)
+            for (const auto & path_option : path_options)
+                if (path_option.contains("://"))
+                    throw Exception(
+                        ErrorCodes::BAD_ARGUMENTS,
+                        "Failover alternative '{}' in the URL path carries its own scheme, which cannot be "
+                        "honoured; put the `|` alternatives in the host part instead",
+                        path_option);
 
     /// Authority/query and path templates are expanded independently. Bound both the logical-shard
     /// Cartesian product and the total number of concrete failover URLs before materializing either.

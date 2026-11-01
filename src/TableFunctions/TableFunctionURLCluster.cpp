@@ -12,11 +12,6 @@
 namespace DB
 {
 
-namespace Setting
-{
-    extern const SettingsBool allow_archive_path_syntax;
-}
-
 namespace
 {
 struct WebObjectStorageUsage
@@ -26,13 +21,14 @@ struct WebObjectStorageUsage
 };
 
 WebObjectStorageUsage getWebObjectStorageUsage(
-    const String & filename, const StorageURL::Configuration & configuration, ContextPtr context)
+    const String & filename, const StorageURL::Configuration & configuration, bool allow_archive_path_syntax)
 {
     String url = filename;
     std::optional<String> archive_pattern;
     /// When archive syntax is disabled, `::` and everything after it deliberately remain part of
     /// the ordinary URL. In particular, glob characters there retain their normal URL semantics.
-    if (context->getSettingsRef()[Setting::allow_archive_path_syntax])
+    /// The value comes from the session that parsed the arguments, see `TableFunctionURL`.
+    if (allow_archive_path_syntax)
         std::tie(url, archive_pattern) = getURLAndArchivePattern(filename);
 
     return {
@@ -51,9 +47,9 @@ StoragePtr TableFunctionURLCluster::getStorage(
     const String & source, const String & format_, const ColumnsDescription & columns, ContextPtr context,
     const std::string & table_name, const String & compression_method_, bool /*is_insert_query*/) const
 {
-    const auto usage = getWebObjectStorageUsage(source, configuration, context);
-    if (usage.has_url_wildcards)
-        checkExperimentalURLWildcardFromIndexPages(context);
+    const auto usage = getWebObjectStorageUsage(source, configuration, allow_archive_path_syntax);
+    if (usage.has_url_wildcards && !is_stored_definition)
+        checkExperimentalURLWildcardFromIndexPages();
 
     if (usage.has_url_wildcards || usage.has_archive_pattern)
     {
@@ -183,6 +179,14 @@ if __name__ == "__main__":
 SELECT * FROM urlCluster('cluster_simple','http://127.0.0.1:12345', CSV, 'column1 String, column2 UInt32')
 ```
 
+## Virtual Columns {#virtual-columns}
+
+- `_path` — Path to the `URL`. For an archive member, the value is `<archive path>::<member path>`. Type: `LowCardinality(String)`.
+- `_file` — Resource name of the `URL`. For an archive member, the value is the member's path inside the archive. Type: `LowCardinality(String)`.
+- `_size` — Size of the resource in bytes. For an archive member, the value is its uncompressed size. Type: `Nullable(UInt64)`. If the size is unknown, the value is `NULL`.
+- `_time` — Last modified time of the file or archive member. Type: `Nullable(DateTime)`. If the time is unknown, the value is `NULL`.
+- `_headers` - HTTP response headers. For an archive member, these are the headers of the metadata probe of the outer archive, not of the request that reads its bytes. Type: `Map(LowCardinality(String), LowCardinality(String))`.
+
 ## Working with archives {#working-with-archives}
 
 Like `url`, `s3Cluster`, and `s3`, `urlCluster` can read files from remote ZIP, TAR, and 7Z archives by separating the archive URL and the path inside it with `::`:
@@ -195,7 +199,7 @@ FROM urlCluster(
 );
 ```
 
-The archive is distributed using the same `StorageObjectStorageCluster` implementation as `s3Cluster`. The [`cluster_function_process_archive_on_multiple_nodes`](/reference/settings/session-settings/cluster#cluster_function_process_archive_on_multiple_nodes) setting controls whether files from one archive can be processed on multiple cluster nodes. Both modes process each matching archive member once when every participating server supports `urlCluster` archive reads; do not use this feature during a mixed-version upgrade with older servers.
+The archive is distributed using the same `StorageObjectStorageCluster` implementation as `s3Cluster`. The [`cluster_function_process_archive_on_multiple_nodes`](/reference/settings/session-settings/cluster#cluster_function_process_archive_on_multiple_nodes) setting controls whether files from one archive can be processed on multiple cluster nodes. Both modes process each matching archive member once when every participating server supports `urlCluster` archive reads. Every worker must support cluster-function protocol version `14`; the initiator rejects the tasks with `UNKNOWN_PROTOCOL` when a worker is below it, instead of letting the worker read a wrong origin.
 
 The [`allow_archive_path_syntax`](/reference/settings/session-settings/allow#allow_archive_path_syntax) setting is enabled by default. A `::` in a URL query string or fragment is treated as an archive separator only when the URL path itself looks like a supported archive path. For example, `api?x=::1` remains literal URL content, while `archive.zip?token=x::member.csv` reads `member.csv` from the archive without requiring spaces around `::`. A path such as `data.zip::v1` is inherently ambiguous and is interpreted as archive syntax while this setting is enabled; to use it as a literal URL path, disable `allow_archive_path_syntax` for the query.
 
